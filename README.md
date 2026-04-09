@@ -290,7 +290,9 @@ Result:
 - **AppLocker bypass research:** Explore whether MSI execution under `msiexec.exe` inherits the AppLocker whitelist context, and whether this can be leveraged to bypass application control in specific configurations
 - **Linux MST generation:** Investigate producing valid MST files on Linux by manually constructing the OLE Compound Document structure, eliminating the Windows dependency for `rogue-mst`
 
+---
 
+Inspired by: [Bypassing EDRs with BYOI](https://www.halcyon.ai/blog/ransomware-attack-bypasses-edr-with-byoi-technique)
 
 
 
