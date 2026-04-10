@@ -149,11 +149,11 @@ The resulting MSI will display this metadata in **"Programs and Features"** if i
   ```bash
   sudo apt update && sudo apt install msitools wixl -y
   
-  git clone https://github.com/BiloIndustries/DFMI.git
+  git clone https://github.com/ccelikanil/DFMI.git
   ```
 - On Windows:
   ```powershell
-  curl https://github.com/BiloIndustries/DFMI/archive/refs/heads/main.zip -o DFMI.zip
+  curl https://github.com/ccelikanil/DFMI/archive/refs/heads/main.zip -o DFMI.zip
 
   Expand-Archive -Path "DFMI.zip" -DestinationPath . ; cd DFMI-main
   ```
