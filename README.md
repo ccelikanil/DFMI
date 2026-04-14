@@ -4,6 +4,8 @@
 
 <p align="center"> <img src="src/99_banner.png" /> </p>
 
+![DFMI PoC Video](https://youtu.be/Mx3aVlS6YeY)
+
 DFMI is a suite that is developed for fileless code execution and/or covert payload delivery in red team engagements through ".msi" files. It abuses the Windows Installer CustomAction mechanism to execute arbitrary payloads silently during software installation — while the legitimate installer continues to function normally from the user's perspective. 
 
 ## ⚠️ DISCLAIMER ⚠️
