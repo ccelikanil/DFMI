@@ -299,6 +299,7 @@ Result:
 
 ## 🦖 Roadmap
 
+- ".msix" support is currently on the agenda.
 - **`inject` MST output mode:** Allow `inject` to optionally output a `.mst` instead of a modified MSI, bridging the Linux gap for `rogue-mst`
 - **Payload encryption:** Encrypt the C2 URL and decode it at runtime inside the CA to avoid static string detection in the MSI database.
 - **AppLocker bypass research:** Explore whether MSI execution under `msiexec.exe` inherits the AppLocker whitelist context, and whether this can be leveraged to bypass application control in specific configurations
