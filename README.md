@@ -17,6 +17,8 @@ DFMI is developed for authorized red team engagements, penetration testing, and 
 ## ⚙️ Current capabilities
 - Fileless payload delivery for initial access and/or post-exploitation --leave no files behind
 - Cross-platform operation: Generate your payloads either from Linux(*) or Windows **--see Module 2 for technical constraints on Linux
+- IPv6 addresses are supported
+- SSL-encrypted (https) C2 servers are supported 
 - Inject backdoors as **"CustomActions"** into **any** MSI package --whether it is signed or unsigned
 - Preserve Authenticode signatures on signed MSIs using MST transforms
 - Generate standalone backdoor MSI packages with custom metadata
@@ -282,6 +284,16 @@ msiexec /i "stub-test.msi"
 Result:
 
 <p align="center"> <img src="src/14_module3_result.png" /> </p>
+
+---
+
+#### Bonus: SSL & IPv6 Support:
+
+DFMI supports IPv6 addresses & SSL encrypted connections 
+
+<p align="center"> <img src="src/17_generate_ipv6.png" /> </p>
+
+<p align="center"> <img src="src/18_ssl_ipv6_e.png" /> </p>
 
 ---
 
