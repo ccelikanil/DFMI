@@ -1313,13 +1313,14 @@ try {{
 if (Test-Path '{safe_out}') {{ Write-Host 'COMPILE_OK' }} else {{ Write-Host 'COMPILE_FAIL'; exit 1 }}
 """
 
-def _msix_cert_ps(cn, out_dir):
+def _msix_cert_ps(cn, out_dir, pfx_pass):
     """PowerShell script: generate self-signed code-signing cert, export .pfx + .cer."""
     pfx = os.path.join(out_dir, 'signing.pfx').replace("'", "''")
     cer = os.path.join(out_dir, 'signing.cer').replace("'", "''")
-    safe_cn = cn.replace("'", "''")
+    safe_cn  = cn.replace("'", "''")
+    safe_pwd = pfx_pass.replace("'", "''")
     return f"""
-$pfxPass = ConvertTo-SecureString -String 'dfmi123' -Force -AsPlainText
+$pfxPass = ConvertTo-SecureString -String '{safe_pwd}' -Force -AsPlainText
 $cert = New-SelfSignedCertificate -Type Custom -Subject 'CN={safe_cn}' `
     -KeyUsage DigitalSignature -FriendlyName '{safe_cn}' `
     -CertStoreLocation 'Cert:\\CurrentUser\\My' `
@@ -1349,10 +1350,10 @@ def _msix_cert_and_sign(msix_unsigned, output, out_dir, publisher_cn, signtool):
     cer_out = os.path.splitext(output)[0] + '.cer'
     pfx_path = os.path.join(out_dir, 'signing.pfx')
     cer_path = os.path.join(out_dir, 'signing.cer')
-    pfx_pass = 'dfmi123'
+    pfx_pass = uuid.uuid4().hex + uuid.uuid4().hex[:8]
 
     print("[*] Generating self-signed certificate...")
-    ok, stdout, stderr = run_ps(_msix_cert_ps(publisher_cn, out_dir))
+    ok, stdout, stderr = run_ps(_msix_cert_ps(publisher_cn, out_dir, pfx_pass))
     if not ok or 'CERT_OK' not in stdout:
         print(f"[!] Certificate failed: {stderr}"); return False
     print("    OK")
