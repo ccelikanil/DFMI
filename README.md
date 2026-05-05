@@ -2,11 +2,13 @@
 
 # Yet another FAFO project: Fileless code execution by abusing MSI installer files
 
-<p align="center"> <img src="src/99_banner.png" /> </p>
+<p align="center"> <img src="src/99_banner2.png" /> </p>
+
+---
 
 ## DFMI PoC Video
 
-[YouTube - DFMI PoC Video](https://youtu.be/Mx3aVlS6YeY)
+[![DFMI-PoCVideo](https://img.youtube.com/vi/Mx3aVlS6YeY/maxresdefault.jpg)](https://youtu.be/Mx3aVlS6YeY)
 
 DFMI is a suite that is developed for fileless code execution and/or covert payload delivery in red team engagements through ".msi" files. It abuses the Windows Installer CustomAction mechanism to execute arbitrary payloads silently during software installation — while the legitimate installer continues to function normally from the user's perspective. 
 
