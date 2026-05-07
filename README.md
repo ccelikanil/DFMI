@@ -18,6 +18,7 @@ DFMI is developed for authorized red team engagements, penetration testing, and 
 
 ## ⚙️ Current capabilities
 - Fileless payload delivery for initial access and/or post-exploitation --leave no files behind
+- **Fileless payload delivery through completely legitimate, signed binaries *(files w/Authenticode signatures)***
 - Cross-platform operation: Generate your payloads either from Linux(*) or Windows **--see Module 2 for technical constraints on Linux
 - IPv6 addresses are supported
 - SSL-encrypted (https) C2 servers are supported 
