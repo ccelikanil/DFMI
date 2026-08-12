@@ -2,6 +2,8 @@
 
 # Yet another FAFO project: Fileless code execution by abusing MSI installer files
 
+ ![DEFCON 34 Demo Labs](https://img.shields.io/badge/DEFCON%2034%20Demo%20Labs-8A2BE2) ![DEFCON 34 Red Team Village](https://img.shields.io/badge/DEFCON%2034%20Red%20Team%20Village-8A2BE2)
+
 <p align="center"> <img src="src/99_banner2.png" /> </p>
 
 ---
